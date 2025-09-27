@@ -94,32 +94,26 @@ const INFO_URL="https://gbfs.citibikenyc.com/gbfs/en/station_information.json";
 const STATUS_URL="https://gbfs.citibikenyc.com/gbfs/en/station_status.json";
 const POLL_MS=60000, SHORT_WIN=15*60*1000;
 const BLUE="#2980b9", ORANGE="#f39c12";
-const SNAPSHOT_URL = "https://vertefeuilles.github.io/bike-tracker/snapshot.json";
+const SNAPSHOT_URL="https://vertefeuilles.github.io/bike-tracker/snapshot.json";
 
 /* State */
 const infoById={}, lastSeen={}, deltas={}, markers={};
 let windowMode="day", threshold=3;
+let hasSnapshotPaint = false; // ← keep snapshot dots until real deltas arrive
 
 /* Map */
 const map=L.map("map").setView([40.73,-73.99],13);
 L.tileLayer("https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}{r}.png",
   {attribution:"© OpenStreetMap & CARTO", maxZoom:19}).addTo(map);
 
-    // put labels above the data and make them non-interactive
+// Labels overlay (names only)
 map.createPane('labels');
 map.getPane('labels').style.zIndex = 650;
 map.getPane('labels').style.pointerEvents = 'none';
-
-// CARTO "labels only" overlay
 L.tileLayer(
   'https://{s}.basemaps.cartocdn.com/light_only_labels/{z}/{x}/{y}{r}.png',
-  {
-    pane: 'labels',
-    attribution: '© OSM & CARTO',
-    opacity: 0.9   // tweak to taste (0.6–1.0)
-  }
+  { pane: 'labels', attribution: '© OSM & CARTO', opacity: 0.9 }
 ).addTo(map);
-
 
 /* Helpers */
 function aggregate(arr,mode,endMs){
@@ -136,7 +130,9 @@ function aggregate(arr,mode,endMs){
   }
   return net;
 }
+function radiusFor(net){const b=Math.sqrt(Math.abs(net)); return Math.max(4, Math.min(18, b*2.2));}
 
+/* Preload from server snapshot and seed deltas */
 async function trySeedFromSnapshot(){
   try{
     const r = await fetch(SNAPSHOT_URL, { cache: "no-store" });
@@ -147,13 +143,11 @@ async function trySeedFromSnapshot(){
     const byStation = Object.create(null);
     for(const s of snap.stations) byStation[s.id] = s.net;
 
-    // 1) Seed visual state immediately
+    // 1) Paint immediately
     for(const id in infoById){
       const net = byStation[id] || 0;
       const show = Math.abs(net) >= threshold;
-      const m = markers[id];
-      if(!m) continue;
-
+      const m = markers[id]; if(!m) continue;
       if(show){
         const color  = net > 0 ? ORANGE : (net < 0 ? BLUE : "#bbb");
         const radius = radiusFor(net);
@@ -165,7 +159,7 @@ async function trySeedFromSnapshot(){
       }
     }
 
-    // 2) Seed the *data* so the first real render doesn't wipe them away
+    // 2) Seed synthetic deltas so the first live render doesn't clear them
     const t = Date.now();
     for(const id in byStation){
       const net = byStation[id];
@@ -174,18 +168,13 @@ async function trySeedFromSnapshot(){
       deltas[id].push({ t, delta: net });
     }
 
-    // Optional: show timestamp
+    hasSnapshotPaint = true; // ← important
     document.getElementById("lastUpdate").textContent =
       "Precomputed " + new Date(snap.generated_at).toLocaleTimeString();
   }catch(_e){
-    // ignore errors; live polling will handle things
+    // ignore; live polling will handle it
   }
 }
-
-
-function radiusFor(net){const b=Math.sqrt(Math.abs(net)); return Math.max(4, Math.min(18, b*2.2));}
-
-
 
 /* Data */
 async function loadInfo(){
@@ -193,34 +182,66 @@ async function loadInfo(){
   if(!r.ok) throw new Error("station_information fetch failed: "+r.status);
   const stations=(await r.json()).data.stations;
   for(const s of stations){
-    infoById[s.station_id]=s;
+    infoById[s.station_id]=s; // includes capacity (if provided)
     markers[s.station_id]=L.circleMarker([s.lat,s.lon],{
       radius:4,weight:0,color:"#111",fillColor:"#bbb",fillOpacity:0,opacity:0
     }).addTo(map);
   }
 }
+
 async function pollStatus(){
   const r=await fetch(STATUS_URL);
   if(!r.ok) throw new Error("station_status fetch failed: "+r.status);
   const now=Date.now();
   const stations=(await r.json()).data.stations;
 
+  let anyDelta=false;
+
   for(const s of stations){
-    const id=s.station_id, bikes=s.num_bikes_available;
+    const id=s.station_id;
+    const bikes=s.num_bikes_available;
+
     if(typeof bikes!=="number") continue;
 
-    if(lastSeen[id]==null){ lastSeen[id]=bikes; continue; }
-    const prev=lastSeen[id], delta=bikes-prev;
-    if(delta!==0){
+    // Treat station as "operational" only if installed + renting + returning
+    const installed = s.is_installed === 1 || s.is_installed === true;
+    const renting   = s.is_renting   === 1 || s.is_renting   === true;
+    const returning = s.is_returning === 1 || s.is_returning === true;
+    const operational = installed && renting && returning;
+
+    if(lastSeen[id]==null){
+      lastSeen[id]=bikes; // seed baseline
+      continue;
+    }
+
+    const prev=lastSeen[id];
+    const delta=bikes-prev;
+
+    // Update baseline regardless (prevents future spikes when a closed station reopens)
+    lastSeen[id]=bikes;
+
+    // Skip non-operational stations (maintenance/closures)
+    if(!operational) continue;
+
+    // Filter out improbable truck moves within a 60s tick (not rider flow)
+    const cap = infoById[id]?.capacity;
+    const bigJump = Math.abs(delta) > (cap ? Math.max(10, Math.ceil(cap*0.35)) : 15);
+    if(delta!==0 && !bigJump){
+      anyDelta=true;
       if(!deltas[id]) deltas[id]=[];
       deltas[id].push({t:now, delta});
+      // prune history to ~36h
       const cutoff=now-36*60*60*1000;
       while(deltas[id].length && deltas[id][0].t<cutoff) deltas[id].shift();
     }
-    lastSeen[id]=bikes;
   }
-  document.getElementById("lastUpdate").textContent="Updated "+new Date().toLocaleTimeString();
-  render();
+
+  document.getElementById("lastUpdate").textContent="Updated "+new Date(now).toLocaleTimeString();
+
+  // Only re-render when we have new rider-like deltas, or if snapshot never painted
+  if(anyDelta || !hasSnapshotPaint){
+    render();
+  }
 }
 
 /* Render */
@@ -258,8 +279,8 @@ document.getElementById("thresh").addEventListener("input", e=>{
 (async function init(){
   try{
     await loadInfo();
-    await trySeedFromSnapshot();   // ← new: instant paint
-    await pollStatus();
+    await trySeedFromSnapshot();   // instant paint + seed
+    await pollStatus();            // live data begins
     setInterval(pollStatus, POLL_MS);
   }catch(err){
     console.error(err);
@@ -267,7 +288,6 @@ document.getElementById("thresh").addEventListener("input", e=>{
       "Error: " + (err?.message || err);
   }
 })();
-
 </script>
 </body>
 </html>
