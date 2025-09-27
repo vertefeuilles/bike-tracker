@@ -1,0 +1,25 @@
+name: Build GBFS Snapshot
+on:
+  schedule:
+    - cron: "*/5 * * * *"    # every 5 minutes
+  workflow_dispatch:         # manual Run button
+  push:
+    branches: [ main ]       # runs on push to main (useful for testing)
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - run: node build_snapshot.mjs
+      - run: |
+          git config user.name "gh-pages bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add snapshot.json history.json
+          git commit -m "Update snapshot [skip ci]" || echo "No changes"
+          git push
