@@ -94,6 +94,7 @@ const INFO_URL="https://gbfs.citibikenyc.com/gbfs/en/station_information.json";
 const STATUS_URL="https://gbfs.citibikenyc.com/gbfs/en/station_status.json";
 const POLL_MS=60000, SHORT_WIN=15*60*1000;
 const BLUE="#2980b9", ORANGE="#f39c12";
+const SNAPSHOT_URL = "https://vertefeuilles.github.io/bike-tracker/snapshot.json";
 
 /* State */
 const infoById={}, lastSeen={}, deltas={}, markers={};
@@ -135,6 +136,39 @@ function aggregate(arr,mode,endMs){
   }
   return net;
 }
+
+async function trySeedFromSnapshot(){
+  try{
+    const r = await fetch(SNAPSHOT_URL, { cache: "no-store" });
+    if(!r.ok) return;
+    const snap = await r.json();
+
+    // Build id -> net map
+    const byStation = Object.create(null);
+    for(const s of snap.stations) byStation[s.id] = s.net;
+
+    // Draw immediately (respect current threshold)
+    for(const id in infoById){
+      const net = byStation[id] || 0;
+      const show = Math.abs(net) >= threshold;
+      const m = markers[id];
+      if(!m) continue;
+
+      if(show){
+        const color = net > 0 ? ORANGE : (net < 0 ? BLUE : "#bbb");
+        const radius = radiusFor(net);
+        const info = infoById[id];
+        m.setStyle({ fillColor: color, color: "#111", radius, weight: 1, fillOpacity: .9, opacity: 1 });
+        m.bindPopup(`<strong>${info.name}</strong><br/>Net: <strong>${net}</strong> (${net<0?"pickups [blue]":"dropoffs [orange] or no change"})`);
+      }else{
+        m.setStyle({ fillOpacity:0, opacity:0, weight:0 });
+      }
+    }
+    document.getElementById("lastUpdate").textContent =
+      "Precomputed " + new Date(snap.generated_at).toLocaleTimeString();
+  }catch(_e){ /* ignore if fetch fails; live polling will kick in */ }
+}
+
 function radiusFor(net){const b=Math.sqrt(Math.abs(net)); return Math.max(4, Math.min(18, b*2.2));}
 
 /* Data */
@@ -208,13 +242,16 @@ document.getElementById("thresh").addEventListener("input", e=>{
 (async function init(){
   try{
     await loadInfo();
+    await trySeedFromSnapshot();   // ← new: instant paint
     await pollStatus();
     setInterval(pollStatus, POLL_MS);
   }catch(err){
     console.error(err);
-    document.getElementById("lastUpdate").textContent="Error: "+(err?.message||err);
+    document.getElementById("lastUpdate").textContent =
+      "Error: " + (err?.message || err);
   }
 })();
+
 </script>
 </body>
 </html>
