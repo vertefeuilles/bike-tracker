@@ -143,11 +143,11 @@ async function trySeedFromSnapshot(){
     if(!r.ok) return;
     const snap = await r.json();
 
-    // Build id -> net map
+    // Build id -> net
     const byStation = Object.create(null);
     for(const s of snap.stations) byStation[s.id] = s.net;
 
-    // Draw immediately (respect current threshold)
+    // 1) Seed visual state immediately
     for(const id in infoById){
       const net = byStation[id] || 0;
       const show = Math.abs(net) >= threshold;
@@ -155,21 +155,37 @@ async function trySeedFromSnapshot(){
       if(!m) continue;
 
       if(show){
-        const color = net > 0 ? ORANGE : (net < 0 ? BLUE : "#bbb");
+        const color  = net > 0 ? ORANGE : (net < 0 ? BLUE : "#bbb");
         const radius = radiusFor(net);
-        const info = infoById[id];
+        const info   = infoById[id];
         m.setStyle({ fillColor: color, color: "#111", radius, weight: 1, fillOpacity: .9, opacity: 1 });
         m.bindPopup(`<strong>${info.name}</strong><br/>Net: <strong>${net}</strong> (${net<0?"pickups [blue]":"dropoffs [orange] or no change"})`);
-      }else{
+      } else {
         m.setStyle({ fillOpacity:0, opacity:0, weight:0 });
       }
     }
+
+    // 2) Seed the *data* so the first real render doesn't wipe them away
+    const t = Date.now();
+    for(const id in byStation){
+      const net = byStation[id];
+      if(net === 0) continue;
+      if(!deltas[id]) deltas[id] = [];
+      deltas[id].push({ t, delta: net });
+    }
+
+    // Optional: show timestamp
     document.getElementById("lastUpdate").textContent =
       "Precomputed " + new Date(snap.generated_at).toLocaleTimeString();
-  }catch(_e){ /* ignore if fetch fails; live polling will kick in */ }
+  }catch(_e){
+    // ignore errors; live polling will handle things
+  }
 }
 
+
 function radiusFor(net){const b=Math.sqrt(Math.abs(net)); return Math.max(4, Math.min(18, b*2.2));}
+
+
 
 /* Data */
 async function loadInfo(){
