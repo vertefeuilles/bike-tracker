@@ -2,292 +2,324 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>Citi Bike — Brutalist Flow</title>
+<title>Citi Bike — 24h Flow (Calm Base + Labels Overlay)</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 
-<!-- Leaflet -->
 <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
 
 <style>
-  /* Page + map */
-  html,body{height:100%;margin:0;font-family:ui-monospace,Menlo,Consolas,monospace}
+  :root{ --ink:#000; --paper:#fff; --muted:#f6f6f6; }
+  html,body{height:100%;margin:0;background:var(--muted);
+    font-family:ui-monospace,Menlo,Consolas,monospace}
   #map{height:100vh}
 
-  /* Controls: bottom-docked brutalist bar */
+  /* Controls */
   .controls{
-    position:fixed;bottom:0;left:0;right:0;z-index:1000;
-    background:#fff;border-top:2px solid #000;
-    padding:8px 12px;display:flex;gap:12px;align-items:center;
-    font-size:12px;text-transform:uppercase;letter-spacing:.02em;
+    position:fixed;left:0;right:0;bottom:0;z-index:1000;
+    display:flex;gap:12px;align-items:center;
+    background:var(--paper); border-top:2px solid var(--ink);
+    padding:8px 12px; text-transform:uppercase; font-size:12px; letter-spacing:.02em;
   }
-  .controls label{display:flex;gap:8px;align-items:center}
-  .controls .spacer{flex:1}
-  .controls .chip{border:2px solid #000;background:#fff;color:#000;padding:3px 6px}
+  .chip{border:2px solid var(--ink); padding:3px 8px; background:var(--paper)}
+  .spacer{flex:1}
 
-  /* Flat dropdown — rectangular, same white background */
-  .controls select{
-    border:2px solid #000;
-    background:#fff;
-    color:#000;
-    padding:4px 6px;
-    font:inherit;
-    cursor:pointer;
-    appearance:none;
-    -webkit-appearance:none;
-    -moz-appearance:none;
-    border-radius:0;
-  }
-  .controls select:focus{outline:none;background:#eee}
+  /* Slider */
+  input[type=range]{appearance:none;height:20px;background:transparent;cursor:pointer}
+  input[type=range]::-webkit-slider-runnable-track{height:4px;background:var(--ink)}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;height:16px;width:10px;background:var(--paper);border:2px solid var(--ink);margin-top:-6px}
+  input[type=range]::-moz-range-track{height:4px;background:var(--ink)}
+  input[type=range]::-moz-range-thumb{height:16px;width:10px;background:var(--paper);border:2px solid var(--ink)}
 
-  /* Slider – stark track + rectangular thumb */
-  .controls input[type=range]{
-    border:none;background:transparent;font:inherit;cursor:pointer;
-    appearance:none;border-radius:0;
-    height:20px;
-  }
-  /* WebKit */
-  .controls input[type=range]::-webkit-slider-runnable-track{height:4px;background:#000;border:none}
-  .controls input[type=range]::-webkit-slider-thumb{
-    -webkit-appearance:none;height:16px;width:8px;background:#fff;border:2px solid #000;margin-top:-6px;cursor:pointer
-  }
-  /* Firefox */
-  .controls input[type=range]::-moz-range-track{height:4px;background:#000;border:none}
-  .controls input[type=range]::-moz-range-thumb{
-    height:16px;width:8px;background:#fff;border:2px solid #000;cursor:pointer
-  }
-
-  /* Leaflet popup frame to match style */
-  .leaflet-popup-content-wrapper,.leaflet-popup-tip{
-    border:2px solid #000;box-shadow:none;border-radius:0;background:#fff
-  }
-  .leaflet-popup-content{margin:10px 12px;font-size:12px;line-height:1.3}
+  /* Legend */
+  .legend{display:flex;gap:8px;align-items:center}
+  .sw{width:12px;height:12px;border:2px solid var(--ink)}
+  .sw.orange{background:#ff7f11}
+  .sw.blue{background:#1f78ff}
 </style>
 </head>
 <body>
-<div id="map" role="region" aria-label="Citi Bike flow map"></div>
+<div id="map" role="region" aria-label="Citi Bike 24-hour flow"></div>
 
-<!-- Bottom controls -->
-<div class="controls" role="group">
-  <label>
-    <span>Window</span>
-    <select id="windowSelect" aria-label="Aggregation window">
-      <option value="now">Last 15 min</option>
-      <option value="hour">Current hour</option>
-      <option value="day" selected>Today so far</option>
-    </select>
+<div class="controls" role="group" aria-label="Controls">
+  <div class="legend">
+    <span class="sw orange" aria-hidden="true"></span><span>Drop-offs ↑</span>
+    <span class="sw blue" aria-hidden="true"></span><span>Pickups ↓</span>
+  </div>
+  <label style="display:flex;gap:8px;align-items:center">
+    <span>Sensitivity</span>
+    <input id="thresh" type="range" min="0" max="20" step="1" value="1" aria-label="Minimum |net| included">
+    <span id="threshVal" class="chip">1</span>
   </label>
-
-  <label>
-    <span>Min |net|</span>
-    <input id="thresh" type="range" min="0" max="20" step="1" value="3" aria-label="Visibility threshold">
-    <span id="threshVal" class="chip">3</span>
-  </label>
-
   <span class="spacer"></span>
+  <span class="chip">Rolling 24h</span>
   <span id="lastUpdate" class="chip">…</span>
 </div>
 
 <script>
-/* Config */
-const INFO_URL="https://gbfs.citibikenyc.com/gbfs/en/station_information.json";
-const STATUS_URL="https://gbfs.citibikenyc.com/gbfs/en/station_status.json";
-const POLL_MS=60000, SHORT_WIN=15*60*1000;
-const BLUE="#2980b9", ORANGE="#f39c12";
-const SNAPSHOT_URL="https://vertefeuilles.github.io/bike-tracker/snapshot.json";
+/* ----------------------------- Config ------------------------------ */
+const INFO_URL     = "https://gbfs.citibikenyc.com/gbfs/en/station_information.json";
+const STATUS_URL   = "https://gbfs.citibikenyc.com/gbfs/en/station_status.json";
+const SNAPSHOT_URL = "https://vertefeuilles.github.io/bike-tracker/snapshot.json";
 
-/* State */
-const infoById={}, lastSeen={}, deltas={}, markers={};
-let windowMode="day", threshold=3;
-let hasSnapshotPaint = false; // ← keep snapshot dots until real deltas arrive
+const POLL_MS   = 60_000;
+const WINDOW_MS = 24*60*60*1000;
+const PRUNE_MS  = 36*60*60*1000;
 
-/* Map */
-const map=L.map("map").setView([40.73,-73.99],13);
-L.tileLayer("https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}{r}.png",
-  {attribution:"© OpenStreetMap & CARTO", maxZoom:19}).addTo(map);
+/* Circle palette */
+const APEX_POS  = [255,127,17];   // orange apex
+const APEX_NEG  = [31,120,255];   // blue apex
+const NEUTRAL   = [122,110,98];   // brownish-grey
+const STROKE    = "#111";
+const FILL_OP   = 0.88;
+const STROKE_W  = 1.25;
 
-// Labels overlay (names only)
-map.createPane('labels');
-map.getPane('labels').style.zIndex = 650;
-map.getPane('labels').style.pointerEvents = 'none';
-L.tileLayer(
-  'https://{s}.basemaps.cartocdn.com/light_only_labels/{z}/{x}/{y}{r}.png',
-  { pane: 'labels', attribution: '© OSM & CARTO', opacity: 0.9 }
+/* Conservative sizing */
+const R_MIN     = 3;
+const R_MAX     = 12;
+const SIZE_EXP  = 0.5;  // sqrt growth
+
+let threshold = 1;
+
+/* ------------------------------ State ------------------------------ */
+const infoById   = Object.create(null);
+const lastSeen   = Object.create(null);
+const deltas     = Object.create(null);
+const markerById = Object.create(null);
+
+/* ------------------------------- Map -------------------------------- */
+const map = L.map("map", {
+  zoomControl: true,
+  wheelDebounceTime: 25,
+  wheelPxPerZoomLevel: 80,
+}).setView([40.73, -73.99], 13);
+
+/* Calm base (no labels) */
+const base = L.tileLayer(
+  "https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}{r}.png",
+  { maxZoom: 19, attribution: "© OpenStreetMap, © CARTO" }
 ).addTo(map);
 
-/* Helpers */
-function aggregate(arr,mode,endMs){
-  if(!arr||!arr.length) return 0; let net=0;
-  if(mode==="now"){
-    const from=endMs-SHORT_WIN;
-    for(let i=arr.length-1;i>=0;i--){const e=arr[i]; if(e.t<from)break; if(e.t<=endMs) net+=e.delta;}
-  }else if(mode==="hour"){
-    const d=new Date(endMs); d.setMinutes(0,0,0); const from=d.getTime();
-    for(let i=arr.length-1;i>=0;i--){const e=arr[i]; if(e.t<from)break; if(e.t<=endMs) net+=e.delta;}
-  }else{ // day
-    const d=new Date(endMs); d.setHours(0,0,0,0); const from=d.getTime();
-    for(let i=arr.length-1;i>=0;i--){const e=arr[i]; if(e.t<from)break; if(e.t<=endMs) net+=e.delta;}
-  }
-  return net;
-}
-function radiusFor(net){const b=Math.sqrt(Math.abs(net)); return Math.max(4, Math.min(18, b*2.2));}
+/* Labels-only overlay in its own pane (non-interactive) */
+map.createPane("labels");
+map.getPane("labels").style.zIndex = 650;
+map.getPane("labels").style.pointerEvents = "none";
 
-/* Preload from server snapshot and seed deltas */
+const labels = L.tileLayer(
+  "https://{s}.basemaps.cartocdn.com/light_only_labels/{z}/{x}/{y}{r}.png",
+  { pane: "labels", maxZoom: 19, attribution: "" }
+).addTo(map);
+
+const renderer = L.canvas({ padding: 0.5 });
+
+/* ----------------------------- Helpers ------------------------------ */
+function sum24h(arr, endMs){
+  if(!arr || arr.length===0) return 0;
+  const from = endMs - WINDOW_MS;
+  let s = 0;
+  for(let i=arr.length-1;i>=0;i--){
+    const e = arr[i];
+    if(e.t < from) break;
+    if(e.t <= endMs) s += e.delta;
+  }
+  return s;
+}
+function p90(values){
+  if(values.length===0) return 1;
+  const a = values.slice().sort((x,y)=>x-y);
+  const idx = Math.min(a.length-1, Math.floor(0.90*(a.length-1)));
+  return Math.max(1, a[idx]);
+}
+function scaleRadius(mag, scale){
+  const w = Math.pow(Math.min(1, mag/scale), SIZE_EXP);
+  return R_MIN + (R_MAX - R_MIN) * w;
+}
+function lerp(a,b,t){ return a + (b - a) * t; }
+function lerpColor(c0, c1, t){
+  const r = Math.round(lerp(c0[0], c1[0], t));
+  const g = Math.round(lerp(c0[1], c1[1], t));
+  const b = Math.round(lerp(c0[2], c1[2], t));
+  return `rgba(${r},${g},${b},1)`;
+}
+function fmtSign(n){ return (n>0?"+":"") + n; }
+function pruneHistory(now){
+  const cutoff = now - PRUNE_MS;
+  for(const id in deltas){
+    const arr = deltas[id];
+    if(!arr) continue;
+    let idx = 0;
+    while(idx < arr.length && arr[idx].t < cutoff) idx++;
+    if(idx > 0) deltas[id] = arr.slice(idx);
+  }
+}
+
+/* ----------------------------- Data Load ---------------------------- */
+async function loadInfo(){
+  const r = await fetch(INFO_URL);
+  if(!r.ok) throw new Error("station_information fetch failed: "+r.status);
+  const stations = (await r.json()).data.stations;
+  for(const s of stations){
+    infoById[s.station_id] = s;
+  }
+}
+
 async function trySeedFromSnapshot(){
   try{
-    const r = await fetch(SNAPSHOT_URL, { cache: "no-store" });
+    const r = await fetch(SNAPSHOT_URL, { cache:"no-store" });
     if(!r.ok) return;
     const snap = await r.json();
-
-    // Build id -> net
-    const byStation = Object.create(null);
-    for(const s of snap.stations) byStation[s.id] = s.net;
-
-    // 1) Paint immediately
-    for(const id in infoById){
-      const net = byStation[id] || 0;
-      const show = Math.abs(net) >= threshold;
-      const m = markers[id]; if(!m) continue;
-      if(show){
-        const color  = net > 0 ? ORANGE : (net < 0 ? BLUE : "#bbb");
-        const radius = radiusFor(net);
-        const info   = infoById[id];
-        m.setStyle({ fillColor: color, color: "#111", radius, weight: 1, fillOpacity: .9, opacity: 1 });
-        m.bindPopup(`<strong>${info.name}</strong><br/>Net: <strong>${net}</strong> (${net<0?"pickups [blue]":"dropoffs [orange] or no change"})`);
-      } else {
-        m.setStyle({ fillOpacity:0, opacity:0, weight:0 });
-      }
-    }
-
-    // 2) Seed synthetic deltas so the first live render doesn't clear them
-    const t = Date.now();
-    for(const id in byStation){
-      const net = byStation[id];
+    const t = new Date(snap.generated_at).getTime();
+    for(const s of snap.stations){
+      const id = s.id, net = s.net;
       if(net === 0) continue;
       if(!deltas[id]) deltas[id] = [];
       deltas[id].push({ t, delta: net });
     }
-
-    hasSnapshotPaint = true; // ← important
     document.getElementById("lastUpdate").textContent =
-      "Precomputed " + new Date(snap.generated_at).toLocaleTimeString();
-  }catch(_e){
-    // ignore; live polling will handle it
-  }
+      "Precomputed " + new Date(t).toLocaleTimeString();
+    render(); // first paint
+  }catch(_e){}
 }
 
-/* Data */
-async function loadInfo(){
-  const r=await fetch(INFO_URL);
-  if(!r.ok) throw new Error("station_information fetch failed: "+r.status);
-  const stations=(await r.json()).data.stations;
-  for(const s of stations){
-    infoById[s.station_id]=s; // includes capacity (if provided)
-    markers[s.station_id]=L.circleMarker([s.lat,s.lon],{
-      radius:4,weight:0,color:"#111",fillColor:"#bbb",fillOpacity:0,opacity:0
-    }).addTo(map);
-  }
-}
-
+let inFlight = null;
 async function pollStatus(){
-  const r=await fetch(STATUS_URL);
-  if(!r.ok) throw new Error("station_status fetch failed: "+r.status);
-  const now=Date.now();
-  const stations=(await r.json()).data.stations;
+  if(inFlight) return;
+  const ctrl = new AbortController(); inFlight = ctrl;
+  try{
+    const r = await fetch(STATUS_URL, { signal: ctrl.signal, cache:"no-store" });
+    if(!r.ok) throw new Error("station_status fetch failed: "+r.status);
 
-  let anyDelta=false;
+    const now = Date.now();
+    const stations = (await r.json()).data.stations;
+    let any = false;
 
-  for(const s of stations){
-    const id=s.station_id;
-    const bikes=s.num_bikes_available;
+    for(const s of stations){
+      const id = s.station_id;
+      const bikes = s.num_bikes_available;
+      if(typeof bikes !== "number") continue;
 
-    if(typeof bikes!=="number") continue;
+      const installed = s.is_installed === 1 || s.is_installed === true;
+      const renting   = s.is_renting   === 1 || s.is_renting   === true;
+      const returning = s.is_returning === 1 || s.is_returning === true;
+      const operational = installed && renting && returning;
 
-    // Treat station as "operational" only if installed + renting + returning
-    const installed = s.is_installed === 1 || s.is_installed === true;
-    const renting   = s.is_renting   === 1 || s.is_renting   === true;
-    const returning = s.is_returning === 1 || s.is_returning === true;
-    const operational = installed && renting && returning;
+      if(lastSeen[id] == null){
+        lastSeen[id] = bikes;
+        continue;
+      }
 
-    if(lastSeen[id]==null){
-      lastSeen[id]=bikes; // seed baseline
-      continue;
+      const prev = lastSeen[id];
+      const delta = bikes - prev;
+      lastSeen[id] = bikes;
+
+      // filter improbable truck moves
+      const cap = infoById[id]?.capacity;
+      const bigJump = Math.abs(delta) > (cap ? Math.max(10, Math.ceil(cap*0.35)) : 15);
+
+      if(delta !== 0 && !bigJump && operational){
+        any = true;
+        if(!deltas[id]) deltas[id] = [];
+        deltas[id].push({ t: now, delta });
+      }
     }
 
-    const prev=lastSeen[id];
-    const delta=bikes-prev;
+    pruneHistory(now);
+    if(any) render();
+    document.getElementById("lastUpdate").textContent =
+      "Updated " + new Date(now).toLocaleTimeString();
 
-    // Update baseline regardless (prevents future spikes when a closed station reopens)
-    lastSeen[id]=bikes;
-
-    // Skip non-operational stations (maintenance/closures)
-    if(!operational) continue;
-
-    // Filter out improbable truck moves within a 60s tick (not rider flow)
-    const cap = infoById[id]?.capacity;
-    const bigJump = Math.abs(delta) > (cap ? Math.max(10, Math.ceil(cap*0.35)) : 15);
-    if(delta!==0 && !bigJump){
-      anyDelta=true;
-      if(!deltas[id]) deltas[id]=[];
-      deltas[id].push({t:now, delta});
-      // prune history to ~36h
-      const cutoff=now-36*60*60*1000;
-      while(deltas[id].length && deltas[id][0].t<cutoff) deltas[id].shift();
-    }
-  }
-
-  document.getElementById("lastUpdate").textContent="Updated "+new Date(now).toLocaleTimeString();
-
-  // Only re-render when we have new rider-like deltas, or if snapshot never painted
-  if(anyDelta || !hasSnapshotPaint){
-    render();
-  }
-}
-
-/* Render */
-function render(){
-  const endMs=Date.now();
-  for(const id in infoById){
-    const net=aggregate(deltas[id], windowMode, endMs);
-    const show=Math.abs(net)>=threshold;
-    const m=markers[id]; if(!m) continue;
-
-    if(show){
-      const color=net>0?ORANGE:(net<0?BLUE:"#bbb");
-      const radius=radiusFor(net);
-      const s=infoById[id];
-      m.setStyle({fillColor:color,color:"#111",radius,weight:1,fillOpacity:.9,opacity:1});
-      m.bindPopup(`<strong>${s.name}</strong><br/>Net: <strong>${net}</strong> (${net<0?"pickups [blue]":"dropoffs [orange] or no change"})`);
-    }else{
-      m.setStyle({fillOpacity:0,opacity:0,weight:0});
-      if(m.isPopupOpen && m.isPopupOpen()) m.closePopup();
-    }
+  }catch(err){
+    console.error(err);
+    document.getElementById("lastUpdate").textContent = "Error: " + (err?.message || err);
+  }finally{
+    inFlight = null;
   }
 }
 
-/* UI */
-document.getElementById("windowSelect").addEventListener("change", e=>{
-  windowMode=e.target.value; render();
-});
+/* ------------------------------- UI -------------------------------- */
 document.getElementById("thresh").addEventListener("input", e=>{
-  threshold=Number(e.target.value);
-  document.getElementById("threshVal").textContent=String(threshold);
+  threshold = Number(e.target.value);
+  document.getElementById("threshVal").textContent = String(threshold);
   render();
 });
 
-/* Init */
+/* ------------------------------ Render ------------------------------ */
+function render(){
+  const endMs = Date.now();
+
+  // p90 normalization over active stations
+  const mags = [];
+  for(const id in infoById){
+    const net = sum24h(deltas[id], endMs);
+    const m = Math.abs(net);
+    if(m >= threshold) mags.push(m);
+  }
+  const scale = p90(mags);
+
+  const seen = new Set();
+
+  for(const id in infoById){
+    const st = infoById[id];
+    const net = sum24h(deltas[id], endMs);
+    const mag = Math.abs(net);
+    let m = markerById[id];
+
+    if(mag < threshold || net === 0){
+      if(m && map.hasLayer(m)) map.removeLayer(m);
+      continue;
+    }
+
+    const w = Math.min(1, mag/scale);
+    const r = scaleRadius(mag, scale);
+    const apex = net > 0 ? APEX_POS : APEX_NEG;
+    const fill = lerpColor(NEUTRAL, apex, Math.pow(w, SIZE_EXP));
+
+    if(!m){
+      m = L.circleMarker([st.lat, st.lon], {
+        renderer,
+        radius: r,
+        color: STROKE,
+        weight: STROKE_W,
+        fillColor: fill,
+        fillOpacity: FILL_OP,
+        bubblingMouseEvents: false
+      }).addTo(map);
+      markerById[id] = m;
+    }else{
+      m.setLatLng([st.lat, st.lon]);
+      m.setRadius(r);
+      m.setStyle({ fillColor: fill });
+      if(!map.hasLayer(m)) m.addTo(map);
+    }
+
+    const title = st.name || `Station ${id}`;
+    m.bindTooltip(`${title}<br>Net 24h: <b>${fmtSign(net)}</b>`, { sticky:true, opacity:0.95 });
+
+    seen.add(id);
+  }
+
+  // prune hidden markers
+  for(const id in markerById){
+    if(!seen.has(id)){
+      const m = markerById[id];
+      if(map.hasLayer(m)) map.removeLayer(m);
+    }
+  }
+}
+
+/* ------------------------------ Init ------------------------------- */
 (async function init(){
   try{
     await loadInfo();
-    await trySeedFromSnapshot();   // instant paint + seed
-    await pollStatus();            // live data begins
+    await trySeedFromSnapshot();   // immediate first paint
+    await pollStatus();            // start live updates
     setInterval(pollStatus, POLL_MS);
   }catch(err){
     console.error(err);
-    document.getElementById("lastUpdate").textContent =
-      "Error: " + (err?.message || err);
+    document.getElementById("lastUpdate").textContent = "Error: " + (err?.message || err);
   }
 })();
 </script>
 </body>
 </html>
+
