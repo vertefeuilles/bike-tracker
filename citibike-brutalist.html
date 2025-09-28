@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>Citi Bike — 24h Flow (Calm Base + Labels Overlay)</title>
+<title>Citi Bike — 24h Flow (Calm Base + Labels Overlay, Fixed Snapshot)</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 
 <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css">
@@ -13,8 +13,6 @@
   html,body{height:100%;margin:0;background:var(--muted);
     font-family:ui-monospace,Menlo,Consolas,monospace}
   #map{height:100vh}
-
-  /* Controls */
   .controls{
     position:fixed;left:0;right:0;bottom:0;z-index:1000;
     display:flex;gap:12px;align-items:center;
@@ -23,15 +21,11 @@
   }
   .chip{border:2px solid var(--ink); padding:3px 8px; background:var(--paper)}
   .spacer{flex:1}
-
-  /* Slider */
   input[type=range]{appearance:none;height:20px;background:transparent;cursor:pointer}
   input[type=range]::-webkit-slider-runnable-track{height:4px;background:var(--ink)}
   input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;height:16px;width:10px;background:var(--paper);border:2px solid var(--ink);margin-top:-6px}
   input[type=range]::-moz-range-track{height:4px;background:var(--ink)}
   input[type=range]::-moz-range-thumb{height:16px;width:10px;background:var(--paper);border:2px solid var(--ink)}
-
-  /* Legend */
   .legend{display:flex;gap:8px;align-items:center}
   .sw{width:12px;height:12px;border:2px solid var(--ink)}
   .sw.orange{background:#ff7f11}
@@ -39,16 +33,15 @@
 </style>
 </head>
 <body>
-<div id="map" role="region" aria-label="Citi Bike 24-hour flow"></div>
-
-<div class="controls" role="group" aria-label="Controls">
+<div id="map"></div>
+<div class="controls">
   <div class="legend">
-    <span class="sw orange" aria-hidden="true"></span><span>Drop-offs ↑</span>
-    <span class="sw blue" aria-hidden="true"></span><span>Pickups ↓</span>
+    <span class="sw orange"></span><span>Drop-offs ↑</span>
+    <span class="sw blue"></span><span>Pickups ↓</span>
   </div>
   <label style="display:flex;gap:8px;align-items:center">
     <span>Sensitivity</span>
-    <input id="thresh" type="range" min="0" max="20" step="1" value="1" aria-label="Minimum |net| included">
+    <input id="thresh" type="range" min="0" max="20" step="1" value="1">
     <span id="threshVal" class="chip">1</span>
   </label>
   <span class="spacer"></span>
@@ -66,260 +59,129 @@ const POLL_MS   = 60_000;
 const WINDOW_MS = 24*60*60*1000;
 const PRUNE_MS  = 36*60*60*1000;
 
-/* Circle palette */
-const APEX_POS  = [255,127,17];   // orange apex
-const APEX_NEG  = [31,120,255];   // blue apex
-const NEUTRAL   = [122,110,98];   // brownish-grey
+const APEX_POS  = [255,127,17];   // orange (drop-offs)
+const APEX_NEG  = [31,120,255];   // blue (pickups)
+const NEUTRAL   = [122,110,98];
 const STROKE    = "#111";
 const FILL_OP   = 0.88;
 const STROKE_W  = 1.25;
 
-/* Conservative sizing */
 const R_MIN     = 3;
 const R_MAX     = 12;
-const SIZE_EXP  = 0.5;  // sqrt growth
+const SIZE_EXP  = 0.5;
 
 let threshold = 1;
+const infoById = {}, lastSeen = {}, deltas = {}, markerById = {};
 
-/* ------------------------------ State ------------------------------ */
-const infoById   = Object.create(null);
-const lastSeen   = Object.create(null);
-const deltas     = Object.create(null);
-const markerById = Object.create(null);
-
-/* ------------------------------- Map -------------------------------- */
-const map = L.map("map", {
-  zoomControl: true,
-  wheelDebounceTime: 25,
-  wheelPxPerZoomLevel: 80,
-}).setView([40.73, -73.99], 13);
-
-/* Calm base (no labels) */
-const base = L.tileLayer(
-  "https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}{r}.png",
-  { maxZoom: 19, attribution: "© OpenStreetMap, © CARTO" }
-).addTo(map);
-
-/* Labels-only overlay in its own pane (non-interactive) */
+const map = L.map("map").setView([40.73, -73.99], 13);
+L.tileLayer("https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}{r}.png",
+  { maxZoom: 19, attribution: "© OpenStreetMap, © CARTO" }).addTo(map);
 map.createPane("labels");
 map.getPane("labels").style.zIndex = 650;
 map.getPane("labels").style.pointerEvents = "none";
-
-const labels = L.tileLayer(
-  "https://{s}.basemaps.cartocdn.com/light_only_labels/{z}/{x}/{y}{r}.png",
-  { pane: "labels", maxZoom: 19, attribution: "" }
-).addTo(map);
+L.tileLayer("https://{s}.basemaps.cartocdn.com/light_only_labels/{z}/{x}/{y}{r}.png",
+  { pane:"labels", maxZoom:19 }).addTo(map);
 
 const renderer = L.canvas({ padding: 0.5 });
 
 /* ----------------------------- Helpers ------------------------------ */
 function sum24h(arr, endMs){
-  if(!arr || arr.length===0) return 0;
+  if(!arr) return 0;
   const from = endMs - WINDOW_MS;
-  let s = 0;
-  for(let i=arr.length-1;i>=0;i--){
-    const e = arr[i];
-    if(e.t < from) break;
-    if(e.t <= endMs) s += e.delta;
-  }
-  return s;
+  return arr.filter(e=>e.t>=from && e.t<=endMs).reduce((s,e)=>s+e.delta,0);
 }
 function p90(values){
-  if(values.length===0) return 1;
-  const a = values.slice().sort((x,y)=>x-y);
-  const idx = Math.min(a.length-1, Math.floor(0.90*(a.length-1)));
-  return Math.max(1, a[idx]);
+  if(!values.length) return 1;
+  const a=[...values].sort((x,y)=>x-y);
+  return Math.max(1,a[Math.floor(0.9*(a.length-1))]);
 }
 function scaleRadius(mag, scale){
   const w = Math.pow(Math.min(1, mag/scale), SIZE_EXP);
-  return R_MIN + (R_MAX - R_MIN) * w;
+  return R_MIN + (R_MAX-R_MIN)*w;
 }
-function lerp(a,b,t){ return a + (b - a) * t; }
-function lerpColor(c0, c1, t){
-  const r = Math.round(lerp(c0[0], c1[0], t));
-  const g = Math.round(lerp(c0[1], c1[1], t));
-  const b = Math.round(lerp(c0[2], c1[2], t));
-  return `rgba(${r},${g},${b},1)`;
+function lerp(a,b,t){ return a+(b-a)*t; }
+function lerpColor(c0,c1,t){
+  return `rgb(${Math.round(lerp(c0[0],c1[0],t))},${Math.round(lerp(c0[1],c1[1],t))},${Math.round(lerp(c0[2],c1[2],t))})`;
 }
-function fmtSign(n){ return (n>0?"+":"") + n; }
 function pruneHistory(now){
-  const cutoff = now - PRUNE_MS;
-  for(const id in deltas){
-    const arr = deltas[id];
-    if(!arr) continue;
-    let idx = 0;
-    while(idx < arr.length && arr[idx].t < cutoff) idx++;
-    if(idx > 0) deltas[id] = arr.slice(idx);
-  }
+  const cutoff=now-PRUNE_MS;
+  for(const id in deltas){ deltas[id]=deltas[id].filter(e=>e.t>=cutoff); }
 }
 
-/* ----------------------------- Data Load ---------------------------- */
+/* ----------------------------- Data ---------------------------- */
 async function loadInfo(){
-  const r = await fetch(INFO_URL);
-  if(!r.ok) throw new Error("station_information fetch failed: "+r.status);
-  const stations = (await r.json()).data.stations;
-  for(const s of stations){
-    infoById[s.station_id] = s;
-  }
+  const r=await fetch(INFO_URL); const stations=(await r.json()).data.stations;
+  stations.forEach(s=>infoById[s.station_id]=s);
 }
-
 async function trySeedFromSnapshot(){
   try{
-    const r = await fetch(SNAPSHOT_URL, { cache:"no-store" });
+    const r=await fetch(SNAPSHOT_URL,{cache:"no-store"});
     if(!r.ok) return;
-    const snap = await r.json();
-    const t = new Date(snap.generated_at).getTime();
+    const snap=await r.json(); const t=new Date(snap.generated_at).getTime();
     for(const s of snap.stations){
-      const id = s.id, net = s.net;
-      if(net === 0) continue;
-      if(!deltas[id]) deltas[id] = [];
-      deltas[id].push({ t, delta: net });
+      const id=s.id, raw=s.net;
+      if(raw===0) continue;
+      if(!deltas[id]) deltas[id]=[];
+      deltas[id].push({t, delta: -raw}); // <<< flipped sign here
     }
-    document.getElementById("lastUpdate").textContent =
-      "Precomputed " + new Date(t).toLocaleTimeString();
-    render(); // first paint
-  }catch(_e){}
+    document.getElementById("lastUpdate").textContent="Precomputed "+new Date(t).toLocaleTimeString();
+    render();
+  }catch(_){}
 }
-
-let inFlight = null;
 async function pollStatus(){
-  if(inFlight) return;
-  const ctrl = new AbortController(); inFlight = ctrl;
-  try{
-    const r = await fetch(STATUS_URL, { signal: ctrl.signal, cache:"no-store" });
-    if(!r.ok) throw new Error("station_status fetch failed: "+r.status);
-
-    const now = Date.now();
-    const stations = (await r.json()).data.stations;
-    let any = false;
-
-    for(const s of stations){
-      const id = s.station_id;
-      const bikes = s.num_bikes_available;
-      if(typeof bikes !== "number") continue;
-
-      const installed = s.is_installed === 1 || s.is_installed === true;
-      const renting   = s.is_renting   === 1 || s.is_renting   === true;
-      const returning = s.is_returning === 1 || s.is_returning === true;
-      const operational = installed && renting && returning;
-
-      if(lastSeen[id] == null){
-        lastSeen[id] = bikes;
-        continue;
-      }
-
-      const prev = lastSeen[id];
-      const delta = bikes - prev;
-      lastSeen[id] = bikes;
-
-      // filter improbable truck moves
-      const cap = infoById[id]?.capacity;
-      const bigJump = Math.abs(delta) > (cap ? Math.max(10, Math.ceil(cap*0.35)) : 15);
-
-      if(delta !== 0 && !bigJump && operational){
-        any = true;
-        if(!deltas[id]) deltas[id] = [];
-        deltas[id].push({ t: now, delta });
-      }
+  const r=await fetch(STATUS_URL,{cache:"no-store"});
+  if(!r.ok) return;
+  const now=Date.now();
+  const stations=(await r.json()).data.stations;
+  let any=false;
+  for(const s of stations){
+    const id=s.station_id, bikes=s.num_bikes_available;
+    if(lastSeen[id]==null){ lastSeen[id]=bikes; continue; }
+    const d=bikes-lastSeen[id]; lastSeen[id]=bikes;
+    if(d!==0 && s.is_installed && s.is_renting && s.is_returning){
+      (deltas[id]??=[]).push({t:now,delta:d}); any=true;
     }
-
-    pruneHistory(now);
-    if(any) render();
-    document.getElementById("lastUpdate").textContent =
-      "Updated " + new Date(now).toLocaleTimeString();
-
-  }catch(err){
-    console.error(err);
-    document.getElementById("lastUpdate").textContent = "Error: " + (err?.message || err);
-  }finally{
-    inFlight = null;
   }
+  pruneHistory(now); if(any) render();
+  document.getElementById("lastUpdate").textContent="Updated "+new Date(now).toLocaleTimeString();
 }
 
 /* ------------------------------- UI -------------------------------- */
-document.getElementById("thresh").addEventListener("input", e=>{
-  threshold = Number(e.target.value);
-  document.getElementById("threshVal").textContent = String(threshold);
+document.getElementById("thresh").addEventListener("input",e=>{
+  threshold=+e.target.value;
+  document.getElementById("threshVal").textContent=threshold;
   render();
 });
 
 /* ------------------------------ Render ------------------------------ */
 function render(){
-  const endMs = Date.now();
-
-  // p90 normalization over active stations
-  const mags = [];
+  const end=Date.now(), mags=[];
   for(const id in infoById){
-    const net = sum24h(deltas[id], endMs);
-    const m = Math.abs(net);
-    if(m >= threshold) mags.push(m);
+    const net=sum24h(deltas[id],end); if(Math.abs(net)>=threshold) mags.push(Math.abs(net));
   }
-  const scale = p90(mags);
-
-  const seen = new Set();
-
+  const scale=p90(mags), seen=new Set();
   for(const id in infoById){
-    const st = infoById[id];
-    const net = sum24h(deltas[id], endMs);
-    const mag = Math.abs(net);
-    let m = markerById[id];
-
-    if(mag < threshold || net === 0){
-      if(m && map.hasLayer(m)) map.removeLayer(m);
-      continue;
-    }
-
-    const w = Math.min(1, mag/scale);
-    const r = scaleRadius(mag, scale);
-    const apex = net > 0 ? APEX_POS : APEX_NEG;
-    const fill = lerpColor(NEUTRAL, apex, Math.pow(w, SIZE_EXP));
-
+    const st=infoById[id], net=sum24h(deltas[id],end), mag=Math.abs(net);
+    if(mag<threshold||net===0){ if(markerById[id]) map.removeLayer(markerById[id]); continue; }
+    const r=scaleRadius(mag,scale);
+    const apex=net>0?APEX_POS:APEX_NEG;
+    const fill=lerpColor(NEUTRAL,apex,Math.pow(Math.min(1,mag/scale),SIZE_EXP));
+    let m=markerById[id];
     if(!m){
-      m = L.circleMarker([st.lat, st.lon], {
-        renderer,
-        radius: r,
-        color: STROKE,
-        weight: STROKE_W,
-        fillColor: fill,
-        fillOpacity: FILL_OP,
-        bubblingMouseEvents: false
-      }).addTo(map);
-      markerById[id] = m;
-    }else{
-      m.setLatLng([st.lat, st.lon]);
-      m.setRadius(r);
-      m.setStyle({ fillColor: fill });
-      if(!map.hasLayer(m)) m.addTo(map);
-    }
-
-    const title = st.name || `Station ${id}`;
-    m.bindTooltip(`${title}<br>Net 24h: <b>${fmtSign(net)}</b>`, { sticky:true, opacity:0.95 });
-
+      m=L.circleMarker([st.lat,st.lon],{renderer,radius:r,color:STROKE,weight:STROKE_W,fillColor:fill,fillOpacity:FILL_OP}).addTo(map);
+      markerById[id]=m;
+    }else{ m.setLatLng([st.lat,st.lon]); m.setRadius(r); m.setStyle({fillColor:fill}); }
+    m.bindTooltip(`${st.name}<br>Net 24h: <b>${net>0?"+":""}${net}</b>`,{sticky:true});
     seen.add(id);
   }
-
-  // prune hidden markers
-  for(const id in markerById){
-    if(!seen.has(id)){
-      const m = markerById[id];
-      if(map.hasLayer(m)) map.removeLayer(m);
-    }
-  }
+  for(const id in markerById) if(!seen.has(id)) map.removeLayer(markerById[id]);
 }
 
 /* ------------------------------ Init ------------------------------- */
 (async function init(){
-  try{
-    await loadInfo();
-    await trySeedFromSnapshot();   // immediate first paint
-    await pollStatus();            // start live updates
-    setInterval(pollStatus, POLL_MS);
-  }catch(err){
-    console.error(err);
-    document.getElementById("lastUpdate").textContent = "Error: " + (err?.message || err);
-  }
+  await loadInfo(); await trySeedFromSnapshot(); await pollStatus();
+  setInterval(pollStatus,POLL_MS);
 })();
 </script>
 </body>
 </html>
-
